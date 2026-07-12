@@ -16,7 +16,7 @@ load_dotenv()
 
 IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp')
 MAX_PRINT_LAST = 50
-PRINT_COMMANDS = {'print', 'print-nc', 'print-last', 'qr', 'barcode', 'cut'}
+PRINT_COMMANDS = {'print', 'print-last', 'qr', 'barcode', 'cut'}
 PRINT_COOLDOWN_SECONDS = max(0, int(os.getenv('PRINT_COOLDOWN_SECONDS', '3')))
 _last_print_command_at = {}
 
@@ -34,7 +34,7 @@ def _parse_allowed_role_ids(raw_value):
 
 ALLOWED_PRINT_ROLE_IDS = _parse_allowed_role_ids(os.getenv('PRINT_ALLOWED_ROLE_IDS', ''))
 COMMAND_PATTERN = re.compile(
-    r'(?<!\S)#(?P<cmd>help|qr|barcode|cut|print-last|print-nc|print)\b(?:\s+(?P<arg>.*))?',
+    r'(?<!\S)#(?P<cmd>help|qr|barcode|cut|print-last|print)\b(?:\s+(?P<arg>.*))?',
     re.IGNORECASE,
 )
 
@@ -79,6 +79,18 @@ def get_channel_label(channel):
     return str(channel)
 
 
+def extract_no_cut_flag(raw_arg):
+    tokens = raw_arg.split()
+    filtered_tokens = []
+    no_cut = False
+    for token in tokens:
+        if token.lower() == '-nc':
+            no_cut = True
+            continue
+        filtered_tokens.append(token)
+    return ' '.join(filtered_tokens), no_cut
+
+
 def is_print_allowed(message, command):
     if command not in PRINT_COMMANDS:
         return True, None
@@ -105,7 +117,7 @@ def is_print_allowed(message, command):
 @bot.event
 async def on_ready():
     logger.info('%s connected', bot.user)
-    logger.info('Watching for #help, #print, #print-nc, #print-last, #qr, #barcode, #cut')
+    logger.info('Watching for #help, #print, #print-last, #qr, #barcode, #cut')
     try:
         printer_manager.check_printer_connection()
         logger.info('Printer connection verified')
@@ -130,7 +142,7 @@ async def on_message(message):
         return
 
     command = match.group('cmd').lower()
-    arg = (match.group('arg') or '').strip()
+    arg, no_cut = extract_no_cut_flag((match.group('arg') or '').strip())
 
     is_allowed, deny_reason = is_print_allowed(message, command)
     if not is_allowed:
@@ -146,37 +158,41 @@ async def on_message(message):
             "=================\n"
             "Commands\n"
             "#print           Print this message or replied message\n"
-            "#print-nc        Print without cutting\n"
             "#print-last N    Print last N messages (max 50)\n"
             "#qr TEXT         Print a QR code\n"
             "#barcode TEXT    Print a Code128 barcode\n"
             "#cut             Cut paper\n"
             "#help            Show this screen\n"
+            "\n"
+            "Flag\n"
+            "-nc              Disable auto-cut for command\n"
             "```"
         )
         await message.add_reaction('✅')
     elif command == 'qr':
-        await handle_qr(message, arg)
+        await handle_qr(message, arg, cut_paper=not no_cut)
     elif command == 'barcode':
-        await handle_barcode(message, arg)
+        await handle_barcode(message, arg, cut_paper=not no_cut)
     elif command == 'cut':
+        if no_cut:
+            await message.reply('`-nc` cannot be used with `#cut`.')
+            await message.add_reaction('❌')
+            await bot.process_commands(message)
+            return
         await handle_cut(message)
     elif command == 'print-last':
-        await handle_print_last(message, arg)
-    elif command == 'print-nc':
-        message_to_print = await get_message_to_print(message)
-        await handle_print_message(message, message_to_print, cut_paper=False)
+        await handle_print_last(message, arg, cut_paper=not no_cut)
     elif command == 'print':
         message_to_print = await get_message_to_print(message)
-        await handle_print_message(message, message_to_print, cut_paper=True)
+        await handle_print_message(message, message_to_print, cut_paper=not no_cut)
 
     await bot.process_commands(message)
 
 
-async def handle_qr(message, qr_data):
+async def handle_qr(message, qr_data, cut_paper=True):
     try:
         if qr_data:
-            printer_manager.print_qr_code(qr_data)
+            printer_manager.print_qr_code(qr_data, cut_paper=cut_paper)
             await message.add_reaction('✅')
         else:
             await message.reply('Please provide data after #qr (e.g., `#qr https://example.com`)')
@@ -186,10 +202,10 @@ async def handle_qr(message, qr_data):
         await message.add_reaction('❌')
 
 
-async def handle_barcode(message, barcode_data):
+async def handle_barcode(message, barcode_data, cut_paper=True):
     try:
         if barcode_data:
-            printer_manager.print_barcode(barcode_data)
+            printer_manager.print_barcode(barcode_data, cut_paper=cut_paper)
             await message.add_reaction('✅')
         else:
             await message.reply('Please provide data after #barcode (e.g., `#barcode 123456789`)')
@@ -208,7 +224,7 @@ async def handle_cut(message):
         await message.add_reaction('❌')
 
 
-async def handle_print_last(message, arg):
+async def handle_print_last(message, arg, cut_paper=True):
     try:
         if not arg:
             await message.reply('Please specify number of messages (e.g., `#print-last 5`)')
@@ -236,7 +252,7 @@ async def handle_print_last(message, arg):
             return
 
         formatted_output = format_multiple_messages(messages, get_channel_label(message.channel))
-        printer_manager.print_message(formatted_output, cut_paper=True)
+        printer_manager.print_message(formatted_output, cut_paper=cut_paper)
         await message.add_reaction('✅')
     except ValueError:
         await message.reply('Please provide a valid number (e.g., `#print-last 5`)')

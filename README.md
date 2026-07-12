@@ -6,7 +6,7 @@ This repository is configured for Epson TM-T88VI on Linux with USB ID `04b8:0202
 
 ## Features
 
-- Prints messages when they contain `#print`, `#print-nc`, or `#print-last N`
+- Prints messages when they contain `#print` or `#print-last N` (use `-nc` to skip cutting)
 - Supports `#qr`, `#barcode`, and `#cut` commands
 - Prints attachments and embedded images
 - Uses USB ESC/POS commands directly (no Windows print spooler)
@@ -120,7 +120,7 @@ If the service starts but cannot print, verify the bot user is in group `lp` and
 
 1. Reply to a message with `#print` to print the original message.
 2. Send `#print` in a message to print that message directly.
-3. Send `#print-nc` to print without cutting paper.
+3. Send `#print -nc` to print without cutting paper.
 4. Send `#print-last 5` to print last five messages.
 5. Send `#qr https://example.com` to print a QR code.
 6. Send `#barcode 123456789` to print a Code128 barcode.

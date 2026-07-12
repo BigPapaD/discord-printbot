@@ -143,19 +143,24 @@ class PrinterManager:
                 except OSError:
                     pass
     
-    def print_qr_code(self, qr_data, scale=8):
+    def print_qr_code(self, qr_data, scale=8, cut_paper=True):
         """Generate and print a QR code
         
         Args:
             qr_data: The data to encode (URL, text, etc.)
             scale: Size of the QR code (default 8)
+            cut_paper: Whether to cut paper after printing (default True)
         """
         
         try:
             printer = self._create_printer()
             printer.set(align="center")
             printer.qr(qr_data, size=scale)
-            printer.text("\n")
+            if cut_paper:
+                printer.text("\n\n")
+                printer.cut(mode="PART")
+            else:
+                printer.text("\n")
             printer.set(align="left")
             printer.close()
             print("QR code printed successfully")
@@ -163,12 +168,13 @@ class PrinterManager:
             print(f"Error generating/printing QR code: {e}")
             raise
     
-    def print_barcode(self, barcode_data, barcode_type='CODE128'):
+    def print_barcode(self, barcode_data, barcode_type='CODE128', cut_paper=True):
         """Generate and print a barcode
         
         Args:
             barcode_data: The barcode data (can be any length alphanumeric)
             barcode_type: Type of barcode (default 'code128' for flexibility)
+            cut_paper: Whether to cut paper after printing (default True)
         """
         
         try:
@@ -188,7 +194,11 @@ class PrinterManager:
                 align_ct=True,
                 force_software=True,
             )
-            printer.text("\n")
+            if cut_paper:
+                printer.text("\n\n")
+                printer.cut(mode="PART")
+            else:
+                printer.text("\n")
             printer.set(align="left")
             printer.close()
             print("Barcode printed successfully")
