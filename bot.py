@@ -65,11 +65,25 @@ bot = PrintBot(command_prefix='!', intents=intents)
 printer_manager = PrinterManager()
 
 
+def get_channel_label(channel):
+    if isinstance(channel, discord.DMChannel):
+        recipient = getattr(channel, 'recipient', None)
+        if recipient is not None:
+            return f'DM:{recipient.name}'
+        return 'DM'
+    if isinstance(channel, discord.GroupChannel):
+        return f'Group DM:{channel.name or "unnamed"}'
+    name = getattr(channel, 'name', None)
+    if name:
+        return f'#{name}'
+    return str(channel)
+
+
 def is_print_allowed(message, command):
     if command not in PRINT_COMMANDS:
         return True, None
 
-    if ALLOWED_PRINT_ROLE_IDS:
+    if ALLOWED_PRINT_ROLE_IDS and message.guild is not None:
         author_roles = getattr(message.author, 'roles', [])
         has_allowed_role = any(getattr(role, 'id', None) in ALLOWED_PRINT_ROLE_IDS for role in author_roles)
         if not has_allowed_role:
@@ -127,14 +141,18 @@ async def on_message(message):
 
     if command == 'help':
         await message.reply(
-            "**Discord Print Bot Commands**\n"
-            "- `#print` Reply to a message or include in a message to print it\n"
-            "- `#print-nc` Print without cutting paper\n"
-            "- `#print-last N` Print last N messages (max 50)\n"
-            "- `#qr <text-or-url>` Print a QR code\n"
-            "- `#barcode <data>` Print a Code128 barcode\n"
-            "- `#cut` Manually cut paper\n"
-            "- `#help` Show this help message"
+            "```\n"
+            "DISCORD PRINT BOT\n"
+            "=================\n"
+            "Commands\n"
+            "#print           Print this message or replied message\n"
+            "#print-nc        Print without cutting\n"
+            "#print-last N    Print last N messages (max 50)\n"
+            "#qr TEXT         Print a QR code\n"
+            "#barcode TEXT    Print a Code128 barcode\n"
+            "#cut             Cut paper\n"
+            "#help            Show this screen\n"
+            "```"
         )
         await message.add_reaction('✅')
     elif command == 'qr':
@@ -217,7 +235,7 @@ async def handle_print_last(message, arg):
             await message.add_reaction('❌')
             return
 
-        formatted_output = format_multiple_messages(messages, message.channel.name)
+        formatted_output = format_multiple_messages(messages, get_channel_label(message.channel))
         printer_manager.print_message(formatted_output, cut_paper=True)
         await message.add_reaction('✅')
     except ValueError:
@@ -230,7 +248,7 @@ async def handle_print_last(message, arg):
 def format_message_for_print(message):
     output = []
     output.append("=" * 40)
-    output.append(f"Channel: #{message.channel.name}")
+    output.append(f"Channel: {get_channel_label(message.channel)}")
     output.append(f"User: {message.author.display_name}")
     output.append(f"Time: {message.created_at.strftime('%Y-%m-%d %H:%M:%S')}")
     output.append("-" * 40)
