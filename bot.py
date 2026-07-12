@@ -4,7 +4,6 @@ import re
 import tempfile
 import time
 import traceback
-import wave
 
 import aiohttp
 import discord
@@ -17,12 +16,13 @@ load_dotenv()
 
 IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp')
 IMAGE_EXTENSIONS_WITHOUT_DOT = {ext.lstrip('.') for ext in IMAGE_EXTENSIONS}
-AUDIO_EXTENSIONS = ('.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac')
 MAX_PRINT_LAST = 50
 PRINT_COMMANDS = {'print', 'print-last', 'qr', 'barcode', 'cut'}
 PRINT_COOLDOWN_SECONDS = max(0, int(os.getenv('PRINT_COOLDOWN_SECONDS', '3')))
-MAX_AUDIO_SPECTROGRAM_SECONDS = max(5, int(os.getenv('MAX_AUDIO_SPECTROGRAM_SECONDS', '120')))
+MAX_DOWNLOAD_BYTES = max(1024 * 1024, int(os.getenv('MAX_DOWNLOAD_BYTES', str(25 * 1024 * 1024))))
+DOWNLOAD_CHUNK_BYTES = 64 * 1024
 _last_print_command_at = {}
+ALLOWED_FUNC_NAMES = {'x', 'y', 'sin', 'cos', 'tan', 'sqrt', 'log', 'exp', 'abs', 'pi', 'e'}
 
 
 def _parse_allowed_role_ids(raw_value):
@@ -38,7 +38,7 @@ def _parse_allowed_role_ids(raw_value):
 
 ALLOWED_PRINT_ROLE_IDS = _parse_allowed_role_ids(os.getenv('PRINT_ALLOWED_ROLE_IDS', ''))
 COMMAND_PATTERN = re.compile(
-    r'(?<!\S)#(?P<cmd>help|qr|barcode|cut|print-last|print)\b(?:\s+(?P<arg>.*))?',
+    r'(?<!\S)#(?P<cmd>help|qr|barcode|cut|func|print-last|print)\b(?:\s+(?P<arg>.*))?',
     re.IGNORECASE,
 )
 
@@ -121,7 +121,7 @@ def is_print_allowed(message, command):
 @bot.event
 async def on_ready():
     logger.info('%s connected', bot.user)
-    logger.info('Watching for #help, #print, #print-last, #qr, #barcode, #cut')
+    logger.info('Watching for #help, #print, #print-last, #qr, #barcode, #func, #cut')
     try:
         printer_manager.check_printer_connection()
         logger.info('Printer connection verified')
@@ -165,9 +165,9 @@ async def on_message(message):
             "#print-last N    Print last N messages (max 50)\n"
             "#qr TEXT         Print a QR code\n"
             "#barcode TEXT    Print a Code128 barcode\n"
+            "#func EQUATION   Plot and print equation\n"
             "#cut             Cut paper\n"
             "#help            Show this screen\n"
-            "(attach audio to print spectrogram)\n"
             "\n"
             "Flag\n"
             "-nc              Disable auto-cut for command\n"
@@ -178,6 +178,8 @@ async def on_message(message):
         await handle_qr(message, arg, cut_paper=not no_cut)
     elif command == 'barcode':
         await handle_barcode(message, arg, cut_paper=not no_cut)
+    elif command == 'func':
+        await handle_func(message, arg, cut_paper=not no_cut)
     elif command == 'cut':
         if no_cut:
             await message.reply('`-nc` cannot be used with `#cut`.')
@@ -218,6 +220,132 @@ async def handle_barcode(message, barcode_data, cut_paper=True):
     except Exception as e:
         logger.error('Error printing barcode: %s', e)
         await message.add_reaction('❌')
+
+
+def normalize_function_expression(expr):
+    cleaned = (expr or '').strip()
+    cleaned = cleaned.replace(' ', '')
+    cleaned = cleaned.replace('{', '(').replace('}', ')')
+    cleaned = cleaned.replace('^', '**')
+    cleaned = cleaned.replace('−', '-')
+
+    # Insert implicit multiplication for common forms like 49(1-y**2), 2x, x(y+1), xy.
+    cleaned = re.sub(r'(\d)([xy(])', r'\1*\2', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'([xy\)])(\d)', r'\1*\2', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'([xy\)])([xy(])', r'\1*\2', cleaned, flags=re.IGNORECASE)
+    return cleaned
+
+
+def validate_function_expression(expr):
+    if not expr:
+        return False
+    if '__' in expr:
+        return False
+    if not re.fullmatch(r'[0-9A-Za-z_+\-*/^().,=]*', expr):
+        return False
+    words = re.findall(r'[A-Za-z_]+', expr)
+    return all(word.lower() in ALLOWED_FUNC_NAMES for word in words)
+
+
+def plot_function_to_image(raw_expression):
+    normalized = normalize_function_expression(raw_expression)
+    if not validate_function_expression(normalized):
+        raise ValueError('Only x/y, numbers, + - * / ^, parentheses, and functions sin cos tan sqrt log exp abs are allowed.')
+
+    if '=' in normalized:
+        left_expr, right_expr = normalized.split('=', 1)
+        if not left_expr or not right_expr:
+            raise ValueError('Equation must include expressions on both sides of =.')
+    else:
+        left_expr = 'y'
+        right_expr = normalized
+
+    try:
+        import numpy as np
+        import matplotlib
+
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+    except Exception as e:
+        raise RuntimeError(f'Function plotting dependencies unavailable: {e}')
+
+    x_values = np.linspace(-20, 20, 900)
+    y_values = np.linspace(-20, 20, 900)
+    x_grid, y_grid = np.meshgrid(x_values, y_values)
+    safe_scope = {
+        'x': x_grid,
+        'y': y_grid,
+        'sin': np.sin,
+        'cos': np.cos,
+        'tan': np.tan,
+        'sqrt': np.sqrt,
+        'log': np.log,
+        'exp': np.exp,
+        'abs': np.abs,
+        'pi': np.pi,
+        'e': np.e,
+    }
+
+    try:
+        with np.errstate(all='ignore'):
+            left_result = eval(left_expr, {'__builtins__': {}}, safe_scope)
+            right_result = eval(right_expr, {'__builtins__': {}}, safe_scope)
+            contour_values = left_result - right_result
+    except Exception as e:
+        raise ValueError(f'Could not evaluate equation: {e}')
+
+    temp_fd, temp_path = tempfile.mkstemp(suffix='.png')
+    os.close(temp_fd)
+
+    fig, ax = plt.subplots(figsize=(6.5, 6.5), dpi=180)
+    contours = ax.contour(x_grid, y_grid, contour_values, levels=[0], colors='black', linewidths=2.0)
+    has_curve = bool(contours.allsegs and contours.allsegs[0])
+
+    if not has_curve:
+        plt.close(fig)
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+        raise ValueError('No visible curve found in default range x,y in [-20, 20].')
+
+    ax.axhline(0, color='gray', linewidth=0.7)
+    ax.axvline(0, color='gray', linewidth=0.7)
+    ax.set_aspect('equal', adjustable='box')
+    ax.set_xlim(-20, 20)
+    ax.set_ylim(-20, 20)
+    ax.set_title(f'f(x,y): {raw_expression[:60]}')
+    ax.set_xlabel('x')
+    ax.set_ylabel('y')
+    fig.tight_layout()
+    fig.savefig(temp_path, format='png')
+    plt.close(fig)
+    return temp_path
+
+
+async def handle_func(message, expression, cut_paper=True):
+    if not expression:
+        await message.reply('Usage: `#func x^{2}=49(1-y^{2})`')
+        await message.add_reaction('❌')
+        return
+
+    image_path = None
+    try:
+        image_path = plot_function_to_image(expression)
+        printer_manager.print_image(image_path)
+        if cut_paper:
+            printer_manager.cut_paper()
+        await message.add_reaction('✅')
+    except Exception as e:
+        logger.error('Error plotting function: %s', e)
+        await message.reply(f'Could not plot expression: {e}')
+        await message.add_reaction('❌')
+    finally:
+        if image_path:
+            try:
+                os.remove(image_path)
+            except OSError:
+                pass
 
 
 async def handle_cut(message):
@@ -338,24 +466,6 @@ def wrap_text(text, width=40):
 def is_image_attachment(attachment):
     return attachment.filename.lower().endswith(IMAGE_EXTENSIONS)
 
-
-def is_audio_attachment(attachment):
-    return attachment.filename.lower().endswith(AUDIO_EXTENSIONS)
-
-
-def format_audio_caption(filename, duration_seconds):
-    safe_name = filename or 'audio'
-    minutes = int(duration_seconds // 60)
-    seconds = int(duration_seconds % 60)
-    return (
-        "=" * 40 + "\n"
-        "AUDIO SPECTROGRAM\n"
-        + "=" * 40 + "\n"
-        + f"File: {safe_name}\n"
-        + f"Duration: {minutes:02d}:{seconds:02d}\n"
-        + "-" * 40 + "\n"
-    )
-
 def get_embed_image_url(embed):
     """Extract image URL from embed if present"""
     if embed.image:
@@ -381,30 +491,6 @@ async def process_and_print_images(message_to_print):
                             os.remove(image_path)
                         except OSError:
                             pass
-            elif is_audio_attachment(attachment):
-                audio_path = await download_audio(attachment)
-                if audio_path:
-                    spectrogram_path = None
-                    duration_seconds = 0.0
-                    try:
-                        spectrogram_path, duration_seconds = generate_spectrogram_from_audio(audio_path, attachment.filename)
-                        if spectrogram_path:
-                            caption_text = format_audio_caption(attachment.filename, duration_seconds)
-                            printer_manager.print_message(caption_text, cut_paper=False)
-                            printer_manager.print_image(spectrogram_path)
-                            printed_any_image = True
-                    except Exception as e:
-                        logger.error('Error printing spectrogram for %s: %s', attachment.filename, e)
-                    finally:
-                        if spectrogram_path:
-                            try:
-                                os.remove(spectrogram_path)
-                            except OSError:
-                                pass
-                        try:
-                            os.remove(audio_path)
-                        except OSError:
-                            pass
     if message_to_print.embeds:
         for embed in message_to_print.embeds:
             image_url = get_embed_image_url(embed)
@@ -428,9 +514,8 @@ async def handle_print_message(message, message_to_print, cut_paper):
         formatted_message = format_message_for_print(message_to_print)
         if cut_paper:
             has_images = any(is_image_attachment(att) for att in message_to_print.attachments)
-            has_audio = any(is_audio_attachment(att) for att in message_to_print.attachments)
             has_embeds = any(get_embed_image_url(embed) for embed in message_to_print.embeds)
-            should_cut_after_text = not (has_images or has_audio or has_embeds)
+            should_cut_after_text = not (has_images or has_embeds)
         else:
             should_cut_after_text = False
         printer_manager.print_message(formatted_message, cut_paper=should_cut_after_text)
@@ -451,176 +536,76 @@ async def get_message_to_print(message):
     return message
 
 async def download_image(attachment):
+    suffix = os.path.splitext(attachment.filename)[1] or '.img'
+    return await download_to_temp_file(attachment.url, suffix, 'attachment image')
+
+
+async def download_to_temp_file(url, suffix, kind):
+    temp_path = None
     try:
         if not bot.http_session or bot.http_session.closed:
-            logger.error('HTTP session is not available for image download')
+            logger.error('HTTP session is not available for %s download', kind)
             return None
-        async with bot.http_session.get(attachment.url) as resp:
-            if resp.status == 200:
-                temp_fd, temp_path = tempfile.mkstemp(suffix=os.path.splitext(attachment.filename)[1])
-                with os.fdopen(temp_fd, 'wb') as f:
-                    f.write(await resp.read())
-                return temp_path
-            logger.warning('Failed to download attachment image %s: HTTP %s', attachment.url, resp.status)
+
+        async with bot.http_session.get(url) as resp:
+            if resp.status != 200:
+                logger.warning('Failed to download %s %s: HTTP %s', kind, url, resp.status)
+                return None
+
+            content_length = resp.headers.get('Content-Length')
+            if content_length:
+                try:
+                    if int(content_length) > MAX_DOWNLOAD_BYTES:
+                        logger.warning(
+                            'Skipping %s %s: content-length %s exceeds limit %s bytes',
+                            kind,
+                            url,
+                            content_length,
+                            MAX_DOWNLOAD_BYTES,
+                        )
+                        return None
+                except ValueError:
+                    pass
+
+            temp_fd, temp_path = tempfile.mkstemp(suffix=suffix)
+            total_bytes = 0
+            with os.fdopen(temp_fd, 'wb') as f:
+                async for chunk in resp.content.iter_chunked(DOWNLOAD_CHUNK_BYTES):
+                    if not chunk:
+                        continue
+                    total_bytes += len(chunk)
+                    if total_bytes > MAX_DOWNLOAD_BYTES:
+                        logger.warning(
+                            'Skipping %s %s: download exceeded limit %s bytes',
+                            kind,
+                            url,
+                            MAX_DOWNLOAD_BYTES,
+                        )
+                        try:
+                            os.remove(temp_path)
+                        except OSError:
+                            pass
+                        return None
+                    f.write(chunk)
+            return temp_path
     except Exception as e:
-        logger.error('Error downloading image: %s', e)
-    return None
-
-
-async def download_audio(attachment):
-    try:
-        if not bot.http_session or bot.http_session.closed:
-            logger.error('HTTP session is not available for audio download')
-            return None
-        suffix = os.path.splitext(attachment.filename)[1] or '.bin'
-        async with bot.http_session.get(attachment.url) as resp:
-            if resp.status == 200:
-                temp_fd, temp_path = tempfile.mkstemp(suffix=suffix)
-                with os.fdopen(temp_fd, 'wb') as f:
-                    f.write(await resp.read())
-                return temp_path
-            logger.warning('Failed to download audio %s: HTTP %s', attachment.url, resp.status)
-    except Exception as e:
-        logger.error('Error downloading audio: %s', e)
-    return None
-
-
-def generate_spectrogram_from_audio(audio_path, source_name):
-    temp_fd, temp_path = tempfile.mkstemp(suffix='.png')
-    os.close(temp_fd)
-
-    def _figure_height_for_duration(duration_seconds):
-        if duration_seconds <= 0:
-            return 1.0
-        return duration_seconds
-
-    # Primary path: librosa supports many formats but may need extra system codecs.
-    try:
-        import numpy as np
-        import librosa
-        import librosa.display
-        import matplotlib
-
-        matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
-        signal, sample_rate = librosa.load(audio_path, sr=None, mono=True)
-        if signal.size == 0:
-            logger.warning('Audio file %s has no samples; skipping spectrogram', source_name)
+        logger.error('Error downloading %s: %s', kind, e)
+        return None
+    finally:
+        if temp_path and os.path.exists(temp_path) and os.path.getsize(temp_path) == 0:
             try:
                 os.remove(temp_path)
             except OSError:
                 pass
-            return None, 0.0
 
-        max_samples = sample_rate * MAX_AUDIO_SPECTROGRAM_SECONDS
-        original_duration_seconds = float(signal.shape[0]) / float(sample_rate)
-        if signal.shape[0] > max_samples:
-            signal = signal[:max_samples]
-
-        mel = librosa.feature.melspectrogram(y=signal, sr=sample_rate, n_fft=2048, hop_length=512, n_mels=128)
-        mel_db = librosa.power_to_db(mel, ref=np.max)
-
-        fig_height = _figure_height_for_duration(original_duration_seconds)
-        fig, ax = plt.subplots(figsize=(4.5, fig_height), dpi=150)
-        # Transpose so time is vertical and uses paper length instead of width.
-        # Put earliest time at the top so print reads naturally top-to-bottom.
-        image = ax.imshow(mel_db.T, origin='upper', aspect='auto', cmap='magma')
-        ax.set_title(f'Spectrogram: {source_name[:40]}')
-        ax.set_xlabel('Mel bins')
-        ax.set_ylabel('Time', rotation=0, labelpad=32)
-        fig.colorbar(image, ax=ax, format='%+2.0f dB')
-        fig.tight_layout()
-        fig.savefig(temp_path, format='png')
-        plt.close(fig)
-        logger.info('Generated spectrogram via librosa for %s', source_name)
-        return temp_path, original_duration_seconds
-    except Exception as e:
-        logger.warning('Librosa spectrogram path failed for %s: %s', source_name, e)
-
-    # Fallback path: WAV-only using stdlib wave + matplotlib.
-    try:
-        import numpy as np
-        import matplotlib
-
-        matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
-
-        with wave.open(audio_path, 'rb') as wav_file:
-            sample_rate = wav_file.getframerate()
-            channels = wav_file.getnchannels()
-            sample_width = wav_file.getsampwidth()
-            total_frames = wav_file.getnframes()
-            raw_bytes = wav_file.readframes(total_frames)
-
-        dtype_map = {1: np.uint8, 2: np.int16, 4: np.int32}
-        if sample_width not in dtype_map:
-            raise ValueError(f'Unsupported WAV sample width: {sample_width}')
-
-        signal = np.frombuffer(raw_bytes, dtype=dtype_map[sample_width])
-        if channels > 1:
-            signal = signal.reshape(-1, channels).mean(axis=1)
-
-        if sample_width == 1:
-            signal = (signal.astype(np.float32) - 128.0) / 128.0
-        elif sample_width == 2:
-            signal = signal.astype(np.float32) / 32768.0
-        else:
-            signal = signal.astype(np.float32) / 2147483648.0
-
-        if signal.size == 0:
-            raise ValueError('WAV file has no samples')
-
-        original_duration_seconds = float(signal.shape[0]) / float(sample_rate)
-        max_samples = sample_rate * MAX_AUDIO_SPECTROGRAM_SECONDS
-        if signal.shape[0] > max_samples:
-            signal = signal[:max_samples]
-
-        # Fallback vertical spectrogram using matplotlib's mlab implementation.
-        from matplotlib.mlab import specgram as mlab_specgram
-
-        pxx, _, _ = mlab_specgram(signal, NFFT=1024, Fs=sample_rate, noverlap=512)
-        pxx_db = 10.0 * np.log10(np.maximum(pxx, 1e-12))
-
-        fig_height = _figure_height_for_duration(original_duration_seconds)
-        fig, ax = plt.subplots(figsize=(4.5, fig_height), dpi=150)
-        image = ax.imshow(pxx_db.T, origin='upper', aspect='auto', cmap='magma')
-        ax.set_title(f'Spectrogram: {source_name[:40]}')
-        ax.set_xlabel('Frequency bins')
-        ax.set_ylabel('Time', rotation=0, labelpad=44)
-        fig.colorbar(image, ax=ax, format='%+2.0f dB')
-        fig.tight_layout()
-        fig.savefig(temp_path, format='png')
-        plt.close(fig)
-        logger.info('Generated spectrogram via WAV fallback for %s', source_name)
-        return temp_path, original_duration_seconds
-    except Exception as e:
-        logger.error('Error generating spectrogram for %s: %s', source_name, e)
-        try:
-            os.remove(temp_path)
-        except OSError:
-            pass
-        return None, 0.0
 
 async def download_image_from_url(url):
-    try:
-        if not bot.http_session or bot.http_session.closed:
-            logger.error('HTTP session is not available for embed image download')
-            return None
-        ext = '.png'
-        if '.' in url:
-            url_ext = url.split('.')[-1].split('?')[0].lower()
-            if url_ext in IMAGE_EXTENSIONS_WITHOUT_DOT:
-                ext = f'.{url_ext}'
-        async with bot.http_session.get(url) as resp:
-            if resp.status == 200:
-                temp_fd, temp_path = tempfile.mkstemp(suffix=ext)
-                with os.fdopen(temp_fd, 'wb') as f:
-                    f.write(await resp.read())
-                return temp_path
-            logger.warning('Failed to download embed image %s: HTTP %s', url, resp.status)
-    except Exception as e:
-        logger.error('Error downloading image from URL: %s', e)
-    return None
+    ext = '.png'
+    if '.' in url:
+        url_ext = url.split('.')[-1].split('?')[0].lower()
+        if url_ext in IMAGE_EXTENSIONS_WITHOUT_DOT:
+            ext = f'.{url_ext}'
+    return await download_to_temp_file(url, ext, 'embed image')
 
 if __name__ == "__main__":
     token = (os.getenv('DISCORD_TOKEN') or '').strip()

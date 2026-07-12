@@ -7,5 +7,5 @@ pillow>=10.0.0
 aiohttp>=3.8.0
 qrcode[pil]>=7.4.0
 python-barcode>=0.15.0
-librosa>=0.10.2
+numpy>=1.26.0
 matplotlib>=3.8.0
