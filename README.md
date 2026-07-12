@@ -9,6 +9,7 @@ This repository is configured for Epson TM-T88VI on Linux with USB ID `04b8:0202
 - Prints messages when they contain `#print` or `#print-last N` (use `-nc` to skip cutting)
 - Supports `#qr`, `#barcode`, and `#cut` commands
 - Prints attachments and embedded images
+- Converts audio attachments to spectrogram images and prints them
 - Uses USB ESC/POS commands directly (no Windows print spooler)
 
 ## Requirements
@@ -51,11 +52,15 @@ PRINTER_USB_IN_EP=0x82
 PRINTER_USB_OUT_EP=0x01
 PRINTER_USB_TIMEOUT=0
 PRINTER_PROFILE=default
+PRINTER_IMAGE_MAX_WIDTH=512
+MAX_AUDIO_SPECTROGRAM_SECONDS=120
 PRINT_COOLDOWN_SECONDS=3
 PRINT_ALLOWED_ROLE_IDS=
 ```
 
 `PRINT_ALLOWED_ROLE_IDS` can be left empty to allow all users, or set to a comma-separated list of Discord role IDs to restrict print commands.
+`PRINTER_IMAGE_MAX_WIDTH` controls image downscaling for your paper width. Lower it if image edges are still cut off.
+`MAX_AUDIO_SPECTROGRAM_SECONDS` limits how much of each audio file is converted to a spectrogram.
 
 4. Optional: list detected USB devices:
 
@@ -126,6 +131,7 @@ If the service starts but cannot print, verify the bot user is in group `lp` and
 6. Send `#barcode 123456789` to print a Code128 barcode.
 7. Send `#cut` to manually cut paper.
 8. Send `#help` to list all bot commands.
+9. Attach a supported audio file (`.wav`, `.mp3`, `.flac`, `.ogg`, `.m4a`, `.aac`) to print its spectrogram.
 
 ## Troubleshooting
 

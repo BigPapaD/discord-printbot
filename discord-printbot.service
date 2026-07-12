@@ -6,19 +6,23 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=YOUR_LINUX_USER
-Group=lp
-WorkingDirectory=/home/YOUR_LINUX_USER/Discord-PrintBot-linux-ver
-EnvironmentFile=/home/YOUR_LINUX_USER/Discord-PrintBot-linux-ver/.env
-ExecStart=/home/YOUR_LINUX_USER/Discord-PrintBot-linux-ver/venv/bin/python bot.py
-Restart=always
-RestartSec=5
+Group=YOUR_LINUX_USER
+SupplementaryGroups=lp
+WorkingDirectory=/home/YOUR_LINUX_USER/discord-printbot
+EnvironmentFile=/home/YOUR_LINUX_USER/discord-printbot/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/YOUR_LINUX_USER/discord-printbot/venv/bin/python -u bot.py
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=30
+UMask=007
 
 # Hardening (safe defaults)
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=read-only
-ReadWritePaths=/home/YOUR_LINUX_USER/Discord-PrintBot-linux-ver
+ReadWritePaths=/home/YOUR_LINUX_USER/discord-printbot
 
 [Install]
 WantedBy=multi-user.target

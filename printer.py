@@ -5,11 +5,13 @@ Uses python-escpos over USB for Epson thermal printers.
 
 import os
 import importlib
+import logging
 import tempfile
 from dotenv import load_dotenv
-from PIL import Image
+from PIL import Image, ImageOps
 
 load_dotenv()
+logger = logging.getLogger('discord-printbot.printer')
 
 
 def _resolve_escpos_usb_class():
@@ -47,6 +49,7 @@ class PrinterManager:
         self.out_ep = int(os.getenv("PRINTER_USB_OUT_EP", "0x01"), 16)
         self.timeout = int(os.getenv("PRINTER_USB_TIMEOUT", "0"))
         self.profile = os.getenv("PRINTER_PROFILE", "default")
+        self.image_max_width = max(1, int(os.getenv("PRINTER_IMAGE_MAX_WIDTH", "512")))
         # Do not probe USB here; keep startup responsive and verify explicitly later.
 
     def _create_printer(self):
@@ -65,7 +68,7 @@ class PrinterManager:
         try:
             printer = self._create_printer()
             printer.close()
-            print(
+            logger.info(
                 f"Using USB printer VID:PID "
                 f"{self.vendor_id:04x}:{self.product_id:04x}"
             )
@@ -105,28 +108,35 @@ class PrinterManager:
                 printer.cut(mode="PART")
             printer.close()
         except Exception as e:
-            print(f"Error during printing: {e}")
+            logger.error('Error during printing: %s', e)
             raise
     
-    def print_image(self, image_path, max_width=576):
+    def print_image(self, image_path, max_width=None):
         """Print an image to thermal printer via USB ESC/POS.
         
         Args:
             image_path: Path to the image file
-            max_width: Maximum width in pixels (default 576 for 80mm paper at 203dpi)
+            max_width: Maximum width in pixels (default from PRINTER_IMAGE_MAX_WIDTH)
         """
         temp_image_path = None
         try:
             image_to_print = image_path
-            if max_width and max_width > 0:
+            effective_max_width = self.image_max_width if max_width is None else max(1, int(max_width))
+            if effective_max_width > 0:
                 with Image.open(image_path) as img:
-                    if img.width > max_width:
-                        scale = max_width / float(img.width)
-                        resized_height = max(1, int(img.height * scale))
-                        resized = img.resize((max_width, resized_height), Image.Resampling.LANCZOS)
+                    normalized = ImageOps.exif_transpose(img)
+                    if normalized.width > effective_max_width:
+                        scale = effective_max_width / float(normalized.width)
+                        resized_height = max(1, int(normalized.height * scale))
+                        resized = normalized.resize((effective_max_width, resized_height), Image.Resampling.LANCZOS)
                         with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
                             temp_image_path = tmp_file.name
                         resized.save(temp_image_path, format='PNG')
+                        image_to_print = temp_image_path
+                    elif normalized is not img:
+                        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
+                            temp_image_path = tmp_file.name
+                        normalized.save(temp_image_path, format='PNG')
                         image_to_print = temp_image_path
 
             printer = self._create_printer()
@@ -134,7 +144,7 @@ class PrinterManager:
             printer.text("\n")
             printer.close()
         except Exception as e:
-            print(f"Error printing image: {e}")
+            logger.error('Error printing image: %s', e)
             raise
         finally:
             if temp_image_path and os.path.exists(temp_image_path):
@@ -163,9 +173,9 @@ class PrinterManager:
                 printer.text("\n")
             printer.set(align="left")
             printer.close()
-            print("QR code printed successfully")
+            logger.info('QR code printed successfully')
         except Exception as e:
-            print(f"Error generating/printing QR code: {e}")
+            logger.error('Error generating/printing QR code: %s', e)
             raise
     
     def print_barcode(self, barcode_data, barcode_type='CODE128', cut_paper=True):
@@ -201,9 +211,9 @@ class PrinterManager:
                 printer.text("\n")
             printer.set(align="left")
             printer.close()
-            print("Barcode printed successfully")
+            logger.info('Barcode printed successfully')
         except Exception as e:
-            print(f"Error generating/printing barcode: {e}")
+            logger.error('Error generating/printing barcode: %s', e)
             raise
     
     def cut_paper(self):
@@ -214,7 +224,7 @@ class PrinterManager:
             printer.cut(mode="PART")
             printer.close()
         except Exception as e:
-            print(f"Error cutting paper: {e}")
+            logger.error('Error cutting paper: %s', e)
             raise
     
     def print_test_page(self):
@@ -240,4 +250,4 @@ Attachments: 0
 """
 
         self.print_message(test_message)
-        print("Test page printed successfully")
+        logger.info('Test page printed successfully')

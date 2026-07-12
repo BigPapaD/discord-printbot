@@ -15,9 +15,12 @@ from printer import PrinterManager
 load_dotenv()
 
 IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp')
+IMAGE_EXTENSIONS_WITHOUT_DOT = {ext.lstrip('.') for ext in IMAGE_EXTENSIONS}
+AUDIO_EXTENSIONS = ('.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac')
 MAX_PRINT_LAST = 50
 PRINT_COMMANDS = {'print', 'print-last', 'qr', 'barcode', 'cut'}
 PRINT_COOLDOWN_SECONDS = max(0, int(os.getenv('PRINT_COOLDOWN_SECONDS', '3')))
+MAX_AUDIO_SPECTROGRAM_SECONDS = max(5, int(os.getenv('MAX_AUDIO_SPECTROGRAM_SECONDS', '120')))
 _last_print_command_at = {}
 
 
@@ -163,6 +166,7 @@ async def on_message(message):
             "#barcode TEXT    Print a Code128 barcode\n"
             "#cut             Cut paper\n"
             "#help            Show this screen\n"
+            "(attach audio to print spectrogram)\n"
             "\n"
             "Flag\n"
             "-nc              Disable auto-cut for command\n"
@@ -287,7 +291,7 @@ def format_multiple_messages(messages, channel_name):
     output = []
     output.append("=" * 40)
     output.append(f"    LAST {len(messages)} MESSAGES")
-    output.append(f"Channel: #{channel_name}")
+    output.append(f"Channel: {channel_name}")
     output.append("=" * 40)
     output.append("")
     
@@ -333,6 +337,24 @@ def wrap_text(text, width=40):
 def is_image_attachment(attachment):
     return attachment.filename.lower().endswith(IMAGE_EXTENSIONS)
 
+
+def is_audio_attachment(attachment):
+    return attachment.filename.lower().endswith(AUDIO_EXTENSIONS)
+
+
+def format_audio_caption(filename, duration_seconds):
+    safe_name = filename or 'audio'
+    minutes = int(duration_seconds // 60)
+    seconds = int(duration_seconds % 60)
+    return (
+        "=" * 40 + "\n"
+        "AUDIO SPECTROGRAM\n"
+        + "=" * 40 + "\n"
+        + f"File: {safe_name}\n"
+        + f"Duration: {minutes:02d}:{seconds:02d}\n"
+        + "-" * 40 + "\n"
+    )
+
 def get_embed_image_url(embed):
     """Extract image URL from embed if present"""
     if embed.image:
@@ -342,6 +364,7 @@ def get_embed_image_url(embed):
     return None
 
 async def process_and_print_images(message_to_print):
+    printed_any_image = False
     if message_to_print.attachments:
         for attachment in message_to_print.attachments:
             if is_image_attachment(attachment):
@@ -349,11 +372,36 @@ async def process_and_print_images(message_to_print):
                 if image_path:
                     try:
                         printer_manager.print_image(image_path)
+                        printed_any_image = True
                     except Exception as e:
                         logger.error('Error printing image: %s', e)
                     finally:
                         try:
                             os.remove(image_path)
+                        except OSError:
+                            pass
+            elif is_audio_attachment(attachment):
+                audio_path = await download_audio(attachment)
+                if audio_path:
+                    spectrogram_path = None
+                    duration_seconds = 0.0
+                    try:
+                        spectrogram_path, duration_seconds = generate_spectrogram_from_audio(audio_path, attachment.filename)
+                        if spectrogram_path:
+                            caption_text = format_audio_caption(attachment.filename, duration_seconds)
+                            printer_manager.print_message(caption_text, cut_paper=False)
+                            printer_manager.print_image(spectrogram_path)
+                            printed_any_image = True
+                    except Exception as e:
+                        logger.error('Error printing spectrogram for %s: %s', attachment.filename, e)
+                    finally:
+                        if spectrogram_path:
+                            try:
+                                os.remove(spectrogram_path)
+                            except OSError:
+                                pass
+                        try:
+                            os.remove(audio_path)
                         except OSError:
                             pass
     if message_to_print.embeds:
@@ -364,6 +412,7 @@ async def process_and_print_images(message_to_print):
                 if image_path:
                     try:
                         printer_manager.print_image(image_path)
+                        printed_any_image = True
                     except Exception as e:
                         logger.error('Error printing embedded image: %s', e)
                     finally:
@@ -371,6 +420,7 @@ async def process_and_print_images(message_to_print):
                             os.remove(image_path)
                         except OSError:
                             pass
+    return printed_any_image
 
 async def handle_print_message(message, message_to_print, cut_paper):
     try:
@@ -382,7 +432,9 @@ async def handle_print_message(message, message_to_print, cut_paper):
         else:
             should_cut_after_text = False
         printer_manager.print_message(formatted_message, cut_paper=should_cut_after_text)
-        await process_and_print_images(message_to_print)
+        printed_any_image = await process_and_print_images(message_to_print)
+        if cut_paper and printed_any_image:
+            printer_manager.cut_paper()
         await message.add_reaction('✅')
     except Exception as e:
         logger.error('Error printing message: %s', e)
@@ -412,6 +464,67 @@ async def download_image(attachment):
         logger.error('Error downloading image: %s', e)
     return None
 
+
+async def download_audio(attachment):
+    try:
+        if not bot.http_session or bot.http_session.closed:
+            logger.error('HTTP session is not available for audio download')
+            return None
+        suffix = os.path.splitext(attachment.filename)[1] or '.bin'
+        async with bot.http_session.get(attachment.url) as resp:
+            if resp.status == 200:
+                temp_fd, temp_path = tempfile.mkstemp(suffix=suffix)
+                with os.fdopen(temp_fd, 'wb') as f:
+                    f.write(await resp.read())
+                return temp_path
+            logger.warning('Failed to download audio %s: HTTP %s', attachment.url, resp.status)
+    except Exception as e:
+        logger.error('Error downloading audio: %s', e)
+    return None
+
+
+def generate_spectrogram_from_audio(audio_path, source_name):
+    try:
+        import numpy as np
+        import librosa
+        import librosa.display
+        import matplotlib
+
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+    except Exception as e:
+        logger.error('Spectrogram dependencies unavailable: %s', e)
+        return None, 0.0
+
+    try:
+        signal, sample_rate = librosa.load(audio_path, sr=None, mono=True)
+        if signal.size == 0:
+            logger.warning('Audio file %s has no samples; skipping spectrogram', source_name)
+            return None, 0.0
+
+        max_samples = sample_rate * MAX_AUDIO_SPECTROGRAM_SECONDS
+        original_duration_seconds = float(signal.shape[0]) / float(sample_rate)
+        if signal.shape[0] > max_samples:
+            signal = signal[:max_samples]
+
+        mel = librosa.feature.melspectrogram(y=signal, sr=sample_rate, n_fft=2048, hop_length=512, n_mels=128)
+        mel_db = librosa.power_to_db(mel, ref=np.max)
+
+        temp_fd, temp_path = tempfile.mkstemp(suffix='.png')
+        os.close(temp_fd)
+
+        fig, ax = plt.subplots(figsize=(8, 4), dpi=150)
+        image = librosa.display.specshow(mel_db, sr=sample_rate, hop_length=512, x_axis='time', y_axis='mel', cmap='magma', ax=ax)
+        ax.set_title(f'Spectrogram: {source_name[:40]}')
+        fig.colorbar(image, ax=ax, format='%+2.0f dB')
+        fig.tight_layout()
+        fig.savefig(temp_path, format='png')
+        plt.close(fig)
+        return temp_path, original_duration_seconds
+    except Exception as e:
+        logger.error('Error generating spectrogram for %s: %s', source_name, e)
+        return None, 0.0
+
 async def download_image_from_url(url):
     try:
         if not bot.http_session or bot.http_session.closed:
@@ -420,7 +533,7 @@ async def download_image_from_url(url):
         ext = '.png'
         if '.' in url:
             url_ext = url.split('.')[-1].split('?')[0].lower()
-            if url_ext in ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp']:
+            if url_ext in IMAGE_EXTENSIONS_WITHOUT_DOT:
                 ext = f'.{url_ext}'
         async with bot.http_session.get(url) as resp:
             if resp.status == 200:
