@@ -332,6 +332,8 @@ async def handle_func(message, expression, cut_paper=True):
     image_path = None
     try:
         image_path = plot_function_to_image(expression)
+        header_text = format_function_request_for_print(message, expression)
+        printer_manager.print_message(header_text, cut_paper=False)
         printer_manager.print_image(image_path)
         if cut_paper:
             printer_manager.cut_paper()
@@ -448,6 +450,18 @@ def format_multiple_messages(messages, channel_name):
     output.append("")
     return "\n".join(output)
 
+def format_function_request_for_print(message, expression):
+    output = []
+    output.append("=" * 40)
+    output.append("FUNCTION PLOT")
+    output.append(f"Channel: {get_channel_label(message.channel)}")
+    output.append(f"User: {message.author.display_name}")
+    output.append(f"Time: {message.created_at.strftime('%Y-%m-%d %H:%M:%S')}")
+    output.append("-" * 40)
+    output.extend(wrap_text(f"Expr: {expression}", width=40))
+    output.append("=" * 40)
+    output.append("")
+    return "\n".join(output)
 def wrap_text(text, width=40):
     words = text.split()
     lines = []
