@@ -490,8 +490,9 @@ def generate_spectrogram_from_audio(audio_path, source_name):
     os.close(temp_fd)
 
     def _figure_height_for_duration(duration_seconds):
-        # Use the printer's unlimited feed direction (paper length) for time detail.
-        return min(24.0, max(8.0, duration_seconds / 6.0))
+        if duration_seconds <= 0:
+            return 1.0
+        return duration_seconds
 
     # Primary path: librosa supports many formats but may need extra system codecs.
     try:
@@ -522,7 +523,8 @@ def generate_spectrogram_from_audio(audio_path, source_name):
         fig_height = _figure_height_for_duration(original_duration_seconds)
         fig, ax = plt.subplots(figsize=(4.5, fig_height), dpi=150)
         # Transpose so time is vertical and uses paper length instead of width.
-        image = ax.imshow(mel_db.T, origin='lower', aspect='auto', cmap='magma')
+        # Put earliest time at the top so print reads naturally top-to-bottom.
+        image = ax.imshow(mel_db.T, origin='upper', aspect='auto', cmap='magma')
         ax.set_title(f'Spectrogram: {source_name[:40]}')
         ax.set_xlabel('Mel bins')
         ax.set_ylabel('Time', rotation=0, labelpad=32)
@@ -581,7 +583,7 @@ def generate_spectrogram_from_audio(audio_path, source_name):
 
         fig_height = _figure_height_for_duration(original_duration_seconds)
         fig, ax = plt.subplots(figsize=(4.5, fig_height), dpi=150)
-        image = ax.imshow(pxx_db.T, origin='lower', aspect='auto', cmap='magma')
+        image = ax.imshow(pxx_db.T, origin='upper', aspect='auto', cmap='magma')
         ax.set_title(f'Spectrogram: {source_name[:40]}')
         ax.set_xlabel('Frequency bins')
         ax.set_ylabel('Time', rotation=0, labelpad=44)
