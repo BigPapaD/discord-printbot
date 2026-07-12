@@ -428,8 +428,9 @@ async def handle_print_message(message, message_to_print, cut_paper):
         formatted_message = format_message_for_print(message_to_print)
         if cut_paper:
             has_images = any(is_image_attachment(att) for att in message_to_print.attachments)
+            has_audio = any(is_audio_attachment(att) for att in message_to_print.attachments)
             has_embeds = any(get_embed_image_url(embed) for embed in message_to_print.embeds)
-            should_cut_after_text = not (has_images or has_embeds)
+            should_cut_after_text = not (has_images or has_audio or has_embeds)
         else:
             should_cut_after_text = False
         printer_manager.print_message(formatted_message, cut_paper=should_cut_after_text)
@@ -524,7 +525,7 @@ def generate_spectrogram_from_audio(audio_path, source_name):
         image = ax.imshow(mel_db.T, origin='lower', aspect='auto', cmap='magma')
         ax.set_title(f'Spectrogram: {source_name[:40]}')
         ax.set_xlabel('Mel bins')
-        ax.set_ylabel('Time')
+        ax.set_ylabel('Time', rotation=0, labelpad=32)
         fig.colorbar(image, ax=ax, format='%+2.0f dB')
         fig.tight_layout()
         fig.savefig(temp_path, format='png')
@@ -583,7 +584,7 @@ def generate_spectrogram_from_audio(audio_path, source_name):
         image = ax.imshow(pxx_db.T, origin='lower', aspect='auto', cmap='magma')
         ax.set_title(f'Spectrogram: {source_name[:40]}')
         ax.set_xlabel('Frequency bins')
-        ax.set_ylabel('Time')
+        ax.set_ylabel('Time', rotation=0, labelpad=44)
         fig.colorbar(image, ax=ax, format='%+2.0f dB')
         fig.tight_layout()
         fig.savefig(temp_path, format='png')
