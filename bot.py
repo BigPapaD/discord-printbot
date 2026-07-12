@@ -22,7 +22,11 @@ PRINT_COOLDOWN_SECONDS = max(0, int(os.getenv('PRINT_COOLDOWN_SECONDS', '3')))
 MAX_DOWNLOAD_BYTES = max(1024 * 1024, int(os.getenv('MAX_DOWNLOAD_BYTES', str(25 * 1024 * 1024))))
 DOWNLOAD_CHUNK_BYTES = 64 * 1024
 _last_print_command_at = {}
-ALLOWED_FUNC_NAMES = {'x', 'y', 'sin', 'cos', 'tan', 'sqrt', 'log', 'exp', 'abs', 'pi', 'e'}
+ALLOWED_FUNC_NAMES = {
+    'x', 'y', 'sin', 'cos', 'tan', 'asin', 'acos', 'atan',
+    'sinh', 'cosh', 'tanh', 'sqrt', 'log', 'exp', 'abs',
+    'floor', 'ceil', 'pi', 'e'
+}
 
 
 def _parse_allowed_role_ids(raw_value):
@@ -168,6 +172,7 @@ async def on_message(message):
             "#func EQUATION   Plot and print equation\n"
             "#cut             Cut paper\n"
             "#help            Show this screen\n"
+            "Ex: #func x^2=49(1-y^2) --x=-10:10 --y=-10:10\n"
             "\n"
             "Flag\n"
             "-nc              Disable auto-cut for command\n"
@@ -247,10 +252,44 @@ def validate_function_expression(expr):
     return all(word.lower() in ALLOWED_FUNC_NAMES for word in words)
 
 
-def plot_function_to_image(raw_expression):
+def parse_range_option(raw_value, option_name):
+    if ':' not in raw_value:
+        raise ValueError(f'Invalid {option_name} range. Use min:max, e.g. --{option_name}=-10:10')
+    left_str, right_str = raw_value.split(':', 1)
+    left = float(left_str)
+    right = float(right_str)
+    if left >= right:
+        raise ValueError(f'Invalid {option_name} range. Min must be smaller than max.')
+    return left, right
+
+
+def parse_func_command_args(raw_args):
+    args = (raw_args or '').strip()
+    x_range = (-20.0, 20.0)
+    y_range = (-20.0, 20.0)
+    resolution = 900
+
+    option_matches = list(re.finditer(r'--(?P<name>x|y|res)=(?P<value>[^\s]+)', args, flags=re.IGNORECASE))
+    for match in option_matches:
+        name = match.group('name').lower()
+        value = match.group('value')
+        if name == 'x':
+            x_range = parse_range_option(value, 'x')
+        elif name == 'y':
+            y_range = parse_range_option(value, 'y')
+        elif name == 'res':
+            resolution = int(value)
+            if resolution < 200 or resolution > 2000:
+                raise ValueError('Resolution must be between 200 and 2000.')
+
+    expression = re.sub(r'--(?:x|y|res)=[^\s]+', '', args, flags=re.IGNORECASE).strip()
+    return expression, x_range, y_range, resolution
+
+
+def plot_function_to_image(raw_expression, x_range, y_range, resolution):
     normalized = normalize_function_expression(raw_expression)
     if not validate_function_expression(normalized):
-        raise ValueError('Only x/y, numbers, + - * / ^, parentheses, and functions sin cos tan sqrt log exp abs are allowed.')
+        raise ValueError('Only x/y, numbers, + - * / ^, parentheses, and supported math functions are allowed.')
 
     if '=' in normalized:
         left_expr, right_expr = normalized.split('=', 1)
@@ -269,8 +308,8 @@ def plot_function_to_image(raw_expression):
     except Exception as e:
         raise RuntimeError(f'Function plotting dependencies unavailable: {e}')
 
-    x_values = np.linspace(-20, 20, 900)
-    y_values = np.linspace(-20, 20, 900)
+    x_values = np.linspace(x_range[0], x_range[1], resolution)
+    y_values = np.linspace(y_range[0], y_range[1], resolution)
     x_grid, y_grid = np.meshgrid(x_values, y_values)
     safe_scope = {
         'x': x_grid,
@@ -278,10 +317,18 @@ def plot_function_to_image(raw_expression):
         'sin': np.sin,
         'cos': np.cos,
         'tan': np.tan,
+        'asin': np.arcsin,
+        'acos': np.arccos,
+        'atan': np.arctan,
+        'sinh': np.sinh,
+        'cosh': np.cosh,
+        'tanh': np.tanh,
         'sqrt': np.sqrt,
         'log': np.log,
         'exp': np.exp,
         'abs': np.abs,
+        'floor': np.floor,
+        'ceil': np.ceil,
         'pi': np.pi,
         'e': np.e,
     }
@@ -298,8 +345,41 @@ def plot_function_to_image(raw_expression):
     os.close(temp_fd)
 
     fig, ax = plt.subplots(figsize=(6.5, 6.5), dpi=180)
-    contours = ax.contour(x_grid, y_grid, contour_values, levels=[0], colors='black', linewidths=2.0)
-    has_curve = bool(contours.allsegs and contours.allsegs[0])
+
+    explicit_handled = False
+    left_lower = left_expr.lower()
+    right_lower = right_expr.lower()
+    if left_lower == 'y' and 'y' not in right_lower:
+        line_scope = dict(safe_scope)
+        line_scope['x'] = x_values
+        line_scope['y'] = np.zeros_like(x_values)
+        with np.errstate(all='ignore'):
+            y_line = eval(right_expr, {'__builtins__': {}}, line_scope)
+        y_line = np.asarray(y_line, dtype=float)
+        if y_line.shape == x_values.shape:
+            valid = np.isfinite(y_line)
+            if np.any(valid):
+                ax.plot(x_values[valid], y_line[valid], color='black', linewidth=2.0)
+                explicit_handled = True
+    elif left_lower == 'x' and 'x' not in right_lower:
+        line_scope = dict(safe_scope)
+        line_scope['y'] = y_values
+        line_scope['x'] = np.zeros_like(y_values)
+        with np.errstate(all='ignore'):
+            x_line = eval(right_expr, {'__builtins__': {}}, line_scope)
+        x_line = np.asarray(x_line, dtype=float)
+        if x_line.shape == y_values.shape:
+            valid = np.isfinite(x_line)
+            if np.any(valid):
+                ax.plot(x_line[valid], y_values[valid], color='black', linewidth=2.0)
+                explicit_handled = True
+
+    has_curve = False
+    if not explicit_handled:
+        contours = ax.contour(x_grid, y_grid, contour_values, levels=[0], colors='black', linewidths=2.0)
+        has_curve = bool(contours.allsegs and contours.allsegs[0])
+    else:
+        has_curve = True
 
     if not has_curve:
         plt.close(fig)
@@ -307,13 +387,13 @@ def plot_function_to_image(raw_expression):
             os.remove(temp_path)
         except OSError:
             pass
-        raise ValueError('No visible curve found in default range x,y in [-20, 20].')
+        raise ValueError('No visible curve found in the selected plot range.')
 
     ax.axhline(0, color='gray', linewidth=0.7)
     ax.axvline(0, color='gray', linewidth=0.7)
     ax.set_aspect('equal', adjustable='box')
-    ax.set_xlim(-20, 20)
-    ax.set_ylim(-20, 20)
+    ax.set_xlim(x_range[0], x_range[1])
+    ax.set_ylim(y_range[0], y_range[1])
     ax.set_title(f'f(x,y): {raw_expression[:60]}')
     ax.set_xlabel('x')
     ax.set_ylabel('y')
@@ -325,13 +405,16 @@ def plot_function_to_image(raw_expression):
 
 async def handle_func(message, expression, cut_paper=True):
     if not expression:
-        await message.reply('Usage: `#func x^{2}=49(1-y^{2})`')
+        await message.reply('Usage: `#func x^{2}=49(1-y^{2}) --x=-10:10 --y=-10:10 --res=900`')
         await message.add_reaction('❌')
         return
 
     image_path = None
     try:
-        image_path = plot_function_to_image(expression)
+        parsed_expression, x_range, y_range, resolution = parse_func_command_args(expression)
+        if not parsed_expression:
+            raise ValueError('Missing equation. Example: #func x^2=49(1-y^2) --x=-10:10')
+        image_path = plot_function_to_image(parsed_expression, x_range, y_range, resolution)
         header_text = format_function_request_for_print(message, expression)
         printer_manager.print_message(header_text, cut_paper=False)
         printer_manager.print_image(image_path)

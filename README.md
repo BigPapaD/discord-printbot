@@ -129,8 +129,9 @@ If the service starts but cannot print, verify the bot user is in group `lp` and
 5. Send `#qr https://example.com` to print a QR code.
 6. Send `#barcode 123456789` to print a Code128 barcode.
 7. Send `#func x^{2}=49(1-y^{2})` to plot and print an equation.
-8. Send `#cut` to manually cut paper.
-9. Send `#help` to list all bot commands.
+8. Optional for `#func`: `--x=min:max --y=min:max --res=900` (example: `#func y=sin(x) --x=-12:12 --y=-2:2 --res=1200`).
+9. Send `#cut` to manually cut paper.
+10. Send `#help` to list all bot commands.
 
 ## Troubleshooting
 
