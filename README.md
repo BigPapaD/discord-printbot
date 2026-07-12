@@ -26,6 +26,12 @@ sudo apt update
 sudo apt install -y libusb-1.0-0 libusb-1.0-0-dev
 ```
 
+For audio spectrogram support with non-WAV formats (mp3/m4a/ogg), install ffmpeg:
+
+```bash
+sudo apt install -y ffmpeg
+```
+
 ## Setup
 
 1. Create virtual environment and install dependencies:
@@ -141,6 +147,7 @@ If the service starts but cannot print, verify the bot user is in group `lp` and
 - Printer not found: confirm VID/PID with `python list_printers.py`.
 - Print command denied: check `PRINT_ALLOWED_ROLE_IDS` and user roles.
 - Print command cooldown: tune `PRINT_COOLDOWN_SECONDS` in `.env`.
+- Audio spectrogram fails for mp3/m4a/ogg: install `ffmpeg` and restart the service.
 
 If bot startup appears to exit with no output, run these checks:
 

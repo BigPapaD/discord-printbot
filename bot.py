@@ -4,6 +4,7 @@ import re
 import tempfile
 import time
 import traceback
+import wave
 
 import aiohttp
 import discord
@@ -484,6 +485,14 @@ async def download_audio(attachment):
 
 
 def generate_spectrogram_from_audio(audio_path, source_name):
+    temp_fd, temp_path = tempfile.mkstemp(suffix='.png')
+    os.close(temp_fd)
+
+    def _figure_height_for_duration(duration_seconds):
+        # Use the printer's unlimited feed direction (paper length) for time detail.
+        return min(24.0, max(8.0, duration_seconds / 6.0))
+
+    # Primary path: librosa supports many formats but may need extra system codecs.
     try:
         import numpy as np
         import librosa
@@ -492,14 +501,13 @@ def generate_spectrogram_from_audio(audio_path, source_name):
 
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
-    except Exception as e:
-        logger.error('Spectrogram dependencies unavailable: %s', e)
-        return None, 0.0
-
-    try:
         signal, sample_rate = librosa.load(audio_path, sr=None, mono=True)
         if signal.size == 0:
             logger.warning('Audio file %s has no samples; skipping spectrogram', source_name)
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
             return None, 0.0
 
         max_samples = sample_rate * MAX_AUDIO_SPECTROGRAM_SECONDS
@@ -510,19 +518,84 @@ def generate_spectrogram_from_audio(audio_path, source_name):
         mel = librosa.feature.melspectrogram(y=signal, sr=sample_rate, n_fft=2048, hop_length=512, n_mels=128)
         mel_db = librosa.power_to_db(mel, ref=np.max)
 
-        temp_fd, temp_path = tempfile.mkstemp(suffix='.png')
-        os.close(temp_fd)
-
-        fig, ax = plt.subplots(figsize=(8, 4), dpi=150)
-        image = librosa.display.specshow(mel_db, sr=sample_rate, hop_length=512, x_axis='time', y_axis='mel', cmap='magma', ax=ax)
+        fig_height = _figure_height_for_duration(original_duration_seconds)
+        fig, ax = plt.subplots(figsize=(4.5, fig_height), dpi=150)
+        # Transpose so time is vertical and uses paper length instead of width.
+        image = ax.imshow(mel_db.T, origin='lower', aspect='auto', cmap='magma')
         ax.set_title(f'Spectrogram: {source_name[:40]}')
+        ax.set_xlabel('Mel bins')
+        ax.set_ylabel('Time')
         fig.colorbar(image, ax=ax, format='%+2.0f dB')
         fig.tight_layout()
         fig.savefig(temp_path, format='png')
         plt.close(fig)
+        logger.info('Generated spectrogram via librosa for %s', source_name)
+        return temp_path, original_duration_seconds
+    except Exception as e:
+        logger.warning('Librosa spectrogram path failed for %s: %s', source_name, e)
+
+    # Fallback path: WAV-only using stdlib wave + matplotlib.
+    try:
+        import numpy as np
+        import matplotlib
+
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+
+        with wave.open(audio_path, 'rb') as wav_file:
+            sample_rate = wav_file.getframerate()
+            channels = wav_file.getnchannels()
+            sample_width = wav_file.getsampwidth()
+            total_frames = wav_file.getnframes()
+            raw_bytes = wav_file.readframes(total_frames)
+
+        dtype_map = {1: np.uint8, 2: np.int16, 4: np.int32}
+        if sample_width not in dtype_map:
+            raise ValueError(f'Unsupported WAV sample width: {sample_width}')
+
+        signal = np.frombuffer(raw_bytes, dtype=dtype_map[sample_width])
+        if channels > 1:
+            signal = signal.reshape(-1, channels).mean(axis=1)
+
+        if sample_width == 1:
+            signal = (signal.astype(np.float32) - 128.0) / 128.0
+        elif sample_width == 2:
+            signal = signal.astype(np.float32) / 32768.0
+        else:
+            signal = signal.astype(np.float32) / 2147483648.0
+
+        if signal.size == 0:
+            raise ValueError('WAV file has no samples')
+
+        original_duration_seconds = float(signal.shape[0]) / float(sample_rate)
+        max_samples = sample_rate * MAX_AUDIO_SPECTROGRAM_SECONDS
+        if signal.shape[0] > max_samples:
+            signal = signal[:max_samples]
+
+        # Fallback vertical spectrogram using matplotlib's mlab implementation.
+        from matplotlib.mlab import specgram as mlab_specgram
+
+        pxx, _, _ = mlab_specgram(signal, NFFT=1024, Fs=sample_rate, noverlap=512)
+        pxx_db = 10.0 * np.log10(np.maximum(pxx, 1e-12))
+
+        fig_height = _figure_height_for_duration(original_duration_seconds)
+        fig, ax = plt.subplots(figsize=(4.5, fig_height), dpi=150)
+        image = ax.imshow(pxx_db.T, origin='lower', aspect='auto', cmap='magma')
+        ax.set_title(f'Spectrogram: {source_name[:40]}')
+        ax.set_xlabel('Frequency bins')
+        ax.set_ylabel('Time')
+        fig.colorbar(image, ax=ax, format='%+2.0f dB')
+        fig.tight_layout()
+        fig.savefig(temp_path, format='png')
+        plt.close(fig)
+        logger.info('Generated spectrogram via WAV fallback for %s', source_name)
         return temp_path, original_duration_seconds
     except Exception as e:
         logger.error('Error generating spectrogram for %s: %s', source_name, e)
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
         return None, 0.0
 
 async def download_image_from_url(url):
